@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::hash::{Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 #[cfg(test)]
 mod tests {
@@ -32,16 +34,16 @@ mod tests {
     }
     #[test]
     fn topk_test(){
-        let stream = vec![1, 1, 1, 1, 1, 2, 2, 2, 3, 1, 4, 4, 4, 4];
+        let stream = vec!['1', '1', '1', '1', '1','2', '2', '2', '3', '4', '4', '4', '4',];
         let mut fss = FilterdSpaceSaving::new(5, 3);
         fss.deal_with_a_stream(stream);
         for ele in fss.monitored_list.iter() {
             println!("{:#?}", ele);
         }
         assert_eq!(fss.monitored_list.len(), 3);
-        assert_eq!(fss.monitored_list[0].value, 2);
-        assert_eq!(fss.monitored_list[1].value, 4);
-        assert_eq!(fss.monitored_list[2].value, 1);
+        assert_eq!(fss.monitored_list[0].value, '2');
+        assert_eq!(fss.monitored_list[1].value, '4');
+        assert_eq!(fss.monitored_list[2].value, '1');
         // assert_eq!(fss.monitored_list[2].value, 2);
 
     }
@@ -65,14 +67,14 @@ impl CellFSS {
 type BitmapCounter = Vec<CellFSS>;
 
 #[derive(Copy, Clone,Debug)]
-struct Element {
-    value: u64, // e in the thesis
+struct Element<T> {
+    value: T, // e in the thesis
     estimated_count: u64, // f in the thesis
     associated_error: u64, // e in the thesis
 }
 
-impl Element {
-    fn new(value: u64, estimated_count: u64, associated_error: u64) -> Self {
+impl<T> Element<T> {
+    fn new(value:T, estimated_count: u64, associated_error: u64) -> Self {
         Element {
             value,
             estimated_count,
@@ -81,37 +83,37 @@ impl Element {
     }
 }
 
-impl Ord for Element {
+impl<T> Ord for Element<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.estimated_count.cmp(&other.estimated_count).then(other.associated_error.cmp(&self.associated_error))
     }
 }
 
-impl PartialEq for Element {
+impl<T> PartialEq for Element<T> {
     fn eq(&self, other: &Self) -> bool {
         &self.estimated_count == &other.estimated_count && &self.associated_error == &other.associated_error
     }
 }
 
-impl PartialOrd for Element {
+impl<T> PartialOrd for Element<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Eq for Element {}
+impl<T> Eq for Element<T> {}
 
-type MonitoredList = Vec<Element>;
+type MonitoredList<T> = Vec<Element<T>>;
 
-struct FilterdSpaceSaving {
-    monitored_list: MonitoredList,
+struct FilterdSpaceSaving<T> {
+    monitored_list: MonitoredList<T>,
     bitmap_counter: BitmapCounter,
     bitmap_counter_size: usize,
     monitored_list_size_max: usize,// the k of topk
     mu: u64, // minimum {f_i}
 }
 
-impl FilterdSpaceSaving {
+impl<T: std::cmp::PartialEq + std::hash::Hash + std::fmt::Debug + std::fmt::Display> FilterdSpaceSaving<T> {
     fn new(bmc_size: usize, ml_size_max: usize) -> Self {
         FilterdSpaceSaving {
             monitored_list: Vec::new(),
@@ -132,42 +134,44 @@ impl FilterdSpaceSaving {
         }
     }
 
-    fn insert_into_monitored_list(&mut self, element: Element) {
+    fn insert_into_monitored_list(&mut self, element: Element<T>) {
+            self.increase_bitmap_counter_count(self.hash_fn(&element.value));
             self.monitored_list.push(element);
-            self.increase_bitmap_counter_count(self.hash_fn(element.value));
             self.update_mu()
     }
     
-    fn replace_elemnt_in_monitored_list(&mut self, new_element: Element) {
+    fn replace_elemnt_in_monitored_list(&mut self, new_element: Element<T>) {
         // deal with the old element
-        let old_element = self.monitored_list[0];
-        let k = self.hash_fn(old_element.value);
+        let old_element = &self.monitored_list[0];
+        let k = self.hash_fn(&old_element.value);
         println!("k is {}", k);
         self.decrease_bitmap_counter_count(k);
         self.bitmap_counter[k].error = new_element.estimated_count;
 
         // replace old with new element
         self.monitored_list[0] = new_element;
-        self.increase_bitmap_counter_count(self.hash_fn(new_element.value));
+        self.increase_bitmap_counter_count(self.hash_fn(&self.monitored_list[0].value));
         self.update_mu();
     }
     
-    fn hash_fn(&self, value: u64) -> usize {
-        let value = value as usize;
-        value % self.bitmap_counter_size
+    fn hash_fn(&self, value: &T) -> usize {
+        let mut s= DefaultHasher::new();
+        value.hash(&mut s);
+        let value = s.finish();
+        (value as usize % self.bitmap_counter_size).try_into().unwrap()
     }
 
-    fn deal_with_a_stream(&mut self,stream: Vec<u64>) {
-        for s in stream.iter(){
-            self.deal_with_new_value(*s);
+    fn deal_with_a_stream(&mut self,stream: Vec<T>) {
+        for s in stream.into_iter(){
+            self.deal_with_new_value(s);
         }
     }
 
-    fn deal_with_new_value(&mut self, value: u64) {
+    fn deal_with_new_value(&mut self, value: T) {
         println!("start to deal value {:?}", value);
-        let idx = self.hash_fn(value);
+        let idx = self.hash_fn(&value);
         if self.bitmap_counter[idx].count > 0 {
-            let found_idx = self.find_element_in_monitored_list(value);
+            let found_idx = self.find_element_in_monitored_list(&value);
             println!("found idx {:?}", found_idx);
             match found_idx {
                 Some(i) =>  {
@@ -191,10 +195,6 @@ impl FilterdSpaceSaving {
         } else {
             self.bitmap_counter[idx].error += 1;
         }
-        println!("####################");
-        println!("after deal value {} monitored_list size is: {}", value, self.monitored_list.len());
-        
-
     }
 
     fn increase_monitor_list_count(&mut self, ml_idx: usize) {
@@ -210,9 +210,9 @@ impl FilterdSpaceSaving {
         println!("desc bitmap_counter[{}] is {}", bmc_idx, self.bitmap_counter[bmc_idx].count);
         self.bitmap_counter[bmc_idx].count -= 1;
     }
-    fn find_element_in_monitored_list(&self, value: u64) -> Option<usize>{
+    fn find_element_in_monitored_list(&self, value: &T) -> Option<usize>{
         for (i, ele) in self.monitored_list.iter().enumerate() {
-            if ele.value == value {
+            if ele.value == *value {
                 return Some(i)
             }
         }
